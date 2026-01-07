@@ -9,8 +9,15 @@ import time
 # CẤU HÌNH API KEY (Điền key của bạn vào đây)
 # ==========================================
 # Lưu ý: Thay API Key thật của bạn vào đây
-GEMINI_API_KEY = "AIzaSy..." 
-OPENAI_API_KEY = "sk-proj..."
+# MỚI (Dùng st.secrets)
+# Nếu chạy trên máy local mà lỗi, nó sẽ báo cần tạo file secrets.toml, 
+# nhưng khi lên web nó sẽ tự lấy từ cấu hình server.
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    
+except:
+    st.error("Chưa cấu hình API Key trong Secrets!")
+    st.stop()
 
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="LN Reader Ultimate", page_icon="📖", layout="wide", initial_sidebar_state="collapsed")
