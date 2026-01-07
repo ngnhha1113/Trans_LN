@@ -1,5 +1,5 @@
 ﻿import streamlit as st
-import trafilatura
+
 import google.generativeai as genai
 from openai import OpenAI
 import re
