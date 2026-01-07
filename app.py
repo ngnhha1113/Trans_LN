@@ -1,5 +1,5 @@
 ﻿import streamlit as st
-
+import trafilatura
 import google.generativeai as genai
 from openai import OpenAI
 import re
@@ -9,12 +9,8 @@ import time
 # CẤU HÌNH API KEY (Điền key của bạn vào đây)
 # ==========================================
 # Lưu ý: Thay API Key thật của bạn vào đây
-# MỚI (Dùng st.secrets)
-# Nếu chạy trên máy local mà lỗi, nó sẽ báo cần tạo file secrets.toml, 
-# nhưng khi lên web nó sẽ tự lấy từ cấu hình server.
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    
 except:
     st.error("Chưa cấu hình API Key trong Secrets!")
     st.stop()
