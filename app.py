@@ -20,14 +20,48 @@ except:
 # --- CẤU HÌNH TRANG ---
 st.set_page_config(page_title="LN Reader Pro (Images)", page_icon="🖼️", layout="wide", initial_sidebar_state="collapsed")
 
-# --- CSS: DARK MODE & UI FIX ---
-st.markdown("""
+# --- QUẢN LÝ STATE (KHỞI TẠO BIẾN) ---
+if 'url_input' not in st.session_state: st.session_state['url_input'] = ""
+if 'translated_content' not in st.session_state: st.session_state['translated_content'] = ""
+if 'auto_run' not in st.session_state: st.session_state['auto_run'] = False
+if 'stats_info' not in st.session_state: st.session_state['stats_info'] = ""
+
+# ==========================================
+# [MỚI] CÀI ĐẶT HIỂN THỊ (FONT & SIZE)
+# ==========================================
+with st.expander("⚙️ Cài đặt hiển thị (Font chữ & Kích thước)"):
+    c_font, c_size = st.columns(2)
+    with c_font:
+        font_choice = st.selectbox(
+            "Phông chữ",
+            ("Merriweather (Sách giấy)", "Segoe UI (Hiện đại)", "Roboto", "Arial", "Times New Roman"),
+            index=0 
+        )
+    with c_size:
+        font_size = st.slider("Cỡ chữ (px)", min_value=14, max_value=32, value=20)
+
+# Map tên hiển thị sang tên Font chuẩn CSS
+font_family_map = {
+    "Merriweather (Sách giấy)": "'Merriweather', serif",
+    "Segoe UI (Hiện đại)": "'Segoe UI', sans-serif",
+    "Roboto": "'Roboto', sans-serif",
+    "Arial": "Arial, sans-serif",
+    "Times New Roman": "'Times New Roman', serif"
+}
+selected_font_css = font_family_map.get(font_choice, "sans-serif")
+
+# --- CSS: DARK MODE & UI FIX (ĐÃ CẬP NHẬT DYNAMIC CSS) ---
+st.markdown(f"""
 <style>
-    .stApp { background-color: #0e1117; }
+    /* Import Google Fonts */
+    @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@300;400;700&family=Roboto:wght@300;400;700&display=swap');
+
+    .stApp {{ background-color: #0e1117; }}
     
-    .reading-content { 
-        font-family: 'Segoe UI', 'Roboto', sans-serif; 
-        font-size: 19px !important; 
+    /* Box hiển thị nội dung truyện - Dùng biến Python để chỉnh CSS */
+    .reading-content {{ 
+        font-family: {selected_font_css} !important; 
+        font-size: {font_size}px !important; 
         line-height: 1.8 !important; 
         color: #e0e0e0; 
         background-color: #1a1c24; 
@@ -35,26 +69,26 @@ st.markdown("""
         border-radius: 12px; 
         border: 1px solid #333; 
         margin-top: 20px;
-    }
+    }}
     
     /* Style cho ảnh trong bài viết */
-    .reading-content img {
+    .reading-content img {{
         display: block;
         margin: 20px auto;
         max-width: 100%;
         border-radius: 8px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }
+    }}
     
     /* Caption ảnh (nếu có) */
-    .reading-content figure figcaption {
+    .reading-content figure figcaption {{
         text-align: center;
         color: #888;
         font-size: 0.9em;
         margin-top: 5px;
-    }
+    }}
 
-    .speed-box {
+    .speed-box {{
         background-color: #0f2e1b;
         color: #4caf50;
         padding: 10px 20px;
@@ -63,46 +97,31 @@ st.markdown("""
         font-family: monospace;
         font-weight: bold;
         margin-bottom: 10px;
-    }
+    }}
 
-    .stTextInput input { color: #fff !important; background-color: #262730 !important; }
-    div.stButton > button { height: 3em; font-weight: bold; }
+    .stTextInput input {{ color: #fff !important; background-color: #262730 !important; }}
+    div.stButton > button {{ height: 3em; font-weight: bold; }}
 </style>
 """, unsafe_allow_html=True)
 
 # --- XỬ LÝ ẢNH (MASKING & UNMASKING) ---
 def mask_images(text):
-    """
-    Tìm các thẻ ảnh Markdown ![alt](url) và thay thế bằng placeholder [[IMG_0]], [[IMG_1]]
-    Trả về: (text_đã_ẩn, danh_sách_link_ảnh)
-    """
-    # Regex tìm markdown image: ![...](...)
     image_pattern = r'!\[.*?\]\((.*?)\)'
     images = re.findall(image_pattern, text)
-    
     masked_text = text
     for i, img_url in enumerate(images):
-        # Thay thế ảnh bằng placeholder
-        # Lưu ý: Escape ký tự đặc biệt trong url để tránh lỗi regex
         masked_text = re.sub(r'!\[.*?\]\(' + re.escape(img_url) + r'\)', f'\n\n[[IMG_{i}]]\n\n', masked_text, count=1)
-    
     return masked_text, images
 
 def unmask_images(text, images):
-    """
-    Thay thế lại [[IMG_x]] bằng thẻ HTML <img src="..."> để hiển thị đẹp hơn
-    """
     restored_text = text
     for i, img_url in enumerate(images):
         placeholder = f"[[IMG_{i}]]"
-        # Tạo thẻ HTML ảnh căn giữa
         html_img = f'<img src="{img_url}" alt="Illustration">'
         if placeholder in restored_text:
             restored_text = restored_text.replace(placeholder, html_img)
         else:
-            # Fallback: Nếu Gemini lỡ xóa mất placeholder, nối ảnh vào cuối đoạn (để không bị mất ảnh)
             restored_text += f"\n\n{html_img}"
-            
     return restored_text
 
 # --- CÁC HÀM XỬ LÝ URL ---
@@ -122,7 +141,6 @@ def get_content(url):
     try:
         downloaded = trafilatura.fetch_url(url)
         if downloaded:
-            # QUAN TRỌNG: include_images=True để lấy ảnh
             return trafilatura.extract(downloaded, include_formatting=True, include_images=True) 
         return None
     except:
@@ -155,23 +173,14 @@ def build_messages(text, style):
 # --- HÀM GỌI MODEL ---
 def call_gemini(text, style, model_name):
     try:
-        # 1. Ẩn ảnh
         masked_text, images = mask_images(text)
-        
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(model_name)
-        
         msgs = build_messages(masked_text, style)
         full_prompt = msgs[0]['content'] + "\n\n" + msgs[1]['content']
-        
-        # 2. Dịch
         response = model.generate_content(full_prompt)
-        translated_raw = response.text
-        
-        # 3. Khôi phục ảnh
-        final_html = unmask_images(translated_raw, images)
+        final_html = unmask_images(response.text, images)
         return final_html
-        
     except Exception as e: return f"❌ Lỗi Gemini: {e}"
 
 def call_openai(text, style):
@@ -190,7 +199,6 @@ def call_ollama(text, style, model_name="qwen2.5:7b"):
     try:
         masked_text, images = mask_images(text)
         client = OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
-        
         response = client.chat.completions.create(
             model=model_name,
             messages=build_messages(masked_text, style),
@@ -204,12 +212,6 @@ def call_ollama(text, style, model_name="qwen2.5:7b"):
 
 # --- GIAO DIỆN CHÍNH ---
 st.title("🖼️ LN Reader Ultimate (Có Ảnh Minh Họa)")
-
-# Session State
-if 'url_input' not in st.session_state: st.session_state['url_input'] = ""
-if 'translated_content' not in st.session_state: st.session_state['translated_content'] = ""
-if 'auto_run' not in st.session_state: st.session_state['auto_run'] = False
-if 'stats_info' not in st.session_state: st.session_state['stats_info'] = ""
 
 def trigger_translation(): st.session_state['auto_run'] = True
 
@@ -229,14 +231,11 @@ st.text_input("Link chương truyện:", key="url_input", placeholder="Nhập li
 c1, c2 = st.columns(2)
 with c1:
     model_options = [
-        "Gemini (gemini-1.5-flash)", # Model ổn định cũ
         "Gemini (gemini-2.5-flash)",
         "Gemini (gemini-flash-latest)",
         "Gemini (gemini-flash-lite-latest)",
         "Gemini (gemini-3-flash-preview)",
-        "Gemini (gemma-3-27b-it)",     # Gemma cũng dùng thư viện Google
-        "Ollama (qwen2.5:7b)",
-        "Ollama (qwen2.5:1.5b)",
+        "Gemini (gemma-3-27b-it)",     
         "ChatGPT (gpt-4o-mini)"
     ]
     model_choice = st.selectbox("Engine", model_options)
@@ -284,7 +283,7 @@ if st.session_state['auto_run'] and st.session_state['url_input']:
 if st.session_state['translated_content']:
     st.divider()
     if st.session_state['stats_info']:
-        st.markdown(f'<div class="speed-box">{st.session_state['stats_info']}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="speed-box">{st.session_state["stats_info"]}</div>', unsafe_allow_html=True)
     
     # QUAN TRỌNG: allow_html=True để render được thẻ <img>
     st.markdown(f"""
