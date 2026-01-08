@@ -8,6 +8,8 @@ import json
 import requests
 import urllib3
 import warnings
+from bs4 import BeautifulSoup # [MỚI] Thư viện để tìm nút Next/Prev chuẩn xác
+from urllib.parse import urljoin # [MỚI] Để nối link tương đối thành tuyệt đối
 
 # --- TẮT CẢNH BÁO ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -20,7 +22,6 @@ try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
     
-    # Cấu hình JSONBin
     JSONBIN_API_KEY = st.secrets["JSONBIN_API_KEY"]
     JSONBIN_BIN_ID = st.secrets["JSONBIN_BIN_ID"]
     JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
@@ -56,8 +57,10 @@ if 'translated_content' not in st.session_state: st.session_state['translated_co
 if 'auto_run' not in st.session_state: st.session_state['auto_run'] = False
 if 'stats_info' not in st.session_state: st.session_state['stats_info'] = ""
 if 'force_translate' not in st.session_state: st.session_state['force_translate'] = False
+# [MỚI] State để lưu link chương trước/sau thực tế tìm được
+if 'nav_links' not in st.session_state: st.session_state['nav_links'] = {'prev': None, 'next': None}
 
-# Load lịch sử từ Cloud
+# Load lịch sử
 if 'history' not in st.session_state: 
     with st.spinner("Đang đồng bộ dữ liệu từ Cloud..."):
         st.session_state['history'] = load_history_from_cloud()
@@ -76,11 +79,8 @@ def parse_metadata(raw_title):
         if split_match: series_name = split_match.group(1).strip(); chapter_name = split_match.group(2).strip() + split_match.group(3).strip()
     return series_name, chapter_name
 
-# [MỚI] Hàm xóa từng chương
 def delete_chapter(target_url):
-    # Lọc bỏ chương có URL trùng khớp
     st.session_state['history'] = [item for item in st.session_state['history'] if item.get('url') != target_url]
-    # Lưu lại lên Cloud ngay lập tức
     save_history_to_cloud(st.session_state['history'])
     st.toast("Đã xóa chương khỏi thư viện!", icon="🗑️")
 
@@ -98,64 +98,49 @@ with st.sidebar:
         font_size = st.slider("Cỡ chữ", 14, 32, 20)
     
     st.divider()
-    
-    # Nút xóa tất cả (để xuống dưới cùng hoặc giữ lại tùy bạn)
-    if st.button("🚨 Xóa TOÀN BỘ thư viện", help="Cẩn thận! Hành động này không thể hoàn tác"):
+    if st.button("🚨 Xóa TOÀN BỘ thư viện"):
         st.session_state['history'] = []
         save_history_to_cloud([])
         st.rerun()
 
     st.subheader("🕒 Lịch sử")
-    
-    # Hiển thị list (Mới nhất lên đầu)
     display_list = list(reversed(st.session_state['history']))[:30]
-    
     for i, item in enumerate(display_list):
         url = item.get('url', '')
         series = item.get('series', 'Truyện')
         chapter = item.get('chapter', 'Chương ?')
-        
-        # Cắt ngắn tên truyện
         short_series = (series[:22] + '..') if len(series) > 22 else series
-        
         has_content = 'content' in item and item['content']
         icon = "💾" if has_content else "☁️"
         
         with st.container():
             st.markdown(f"**📖 {short_series}**")
-            
-            # [MỚI] Chia cột: 4 phần cho nút đọc, 1 phần cho nút xóa
             col_read, col_del = st.columns([4, 1])
-            
             with col_read:
                 if st.button(f"{icon} {chapter}", key=f"read_{i}", help=url, use_container_width=True):
                     st.session_state['url_input'] = url
                     st.session_state['auto_run'] = True
                     st.session_state['force_translate'] = False
                     st.rerun()
-            
             with col_del:
-                # Nút xóa nhỏ
                 if st.button("🗑️", key=f"del_{i}", help="Xóa chương này", use_container_width=True):
                     delete_chapter(url)
                     st.rerun()
-            
             st.markdown("---")
 
-# --- CSS & CRAWL LOGIC ---
+# --- CSS ---
 selected_css = font_family_map.get(font_choice, "sans-serif")
 st.markdown(f"""
 <style>
     .stApp {{ background-color: #0e1117; }}
     .reading-content {{ font-family: {selected_css} !important; font-size: {font_size}px !important; line-height: 1.8 !important; color: #e0e0e0; background-color: #1a1c24; padding: 40px; border-radius: 12px; border: 1px solid #333; margin-top: 20px; }}
     .reading-content img {{ display: block; margin: 20px auto; max-width: 100%; border-radius: 8px; }}
-    .reading-content figure figcaption {{ text-align: center; color: #888; font-size: 0.9em; }}
     div.stButton > button {{ border-radius: 6px; }}
-    /* Tùy chỉnh nút xóa cho đẹp */
     div[data-testid="column"] button[kind="secondary"] {{ padding: 0.25rem 0.5rem; }}
 </style>
 """, unsafe_allow_html=True)
 
+# --- CORE LOGIC ---
 def mask_images(text):
     image_pattern = r'!\[.*?\]\((.*?)\)'
     images = re.findall(image_pattern, text)
@@ -171,21 +156,81 @@ def unmask_images(text, images):
         else: restored_text += f"\n\n{html_img}"
     return restored_text
 
+# ========================================================
+# [MỚI] HÀM TÌM NÚT NEXT/PREV THÔNG MINH
+# ========================================================
+def extract_navigation(html_content, base_url):
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        next_url = None
+        prev_url = None
+
+        # 1. Tìm bằng thuộc tính rel (Chuẩn SEO)
+        link_next = soup.find('a', rel='next')
+        link_prev = soup.find('a', rel='prev')
+        if link_next: next_url = link_next.get('href')
+        if link_prev: prev_url = link_prev.get('href')
+
+        # 2. Tìm bằng Class hoặc Text (Dự phòng)
+        if not next_url:
+            # Tìm thẻ a có class chứa 'next' hoặc text chứa 'Next/Sau/Tiếp'
+            for a in soup.find_all('a', href=True):
+                # Kiểm tra class
+                classes = a.get('class', [])
+                class_str = " ".join(classes).lower() if classes else ""
+                
+                # Kiểm tra text
+                text = a.get_text().strip().lower()
+                
+                if 'next' in class_str or 'next' in text or 'sau' in text or 'tiếp' in text or '>>' in text:
+                    next_url = a['href']
+                    break
+        
+        if not prev_url:
+            for a in soup.find_all('a', href=True):
+                classes = a.get('class', [])
+                class_str = " ".join(classes).lower() if classes else ""
+                text = a.get_text().strip().lower()
+                
+                if 'prev' in class_str or 'prev' in text or 'trước' in text or 'cũ' in text or '<<' in text:
+                    prev_url = a['href']
+                    break
+
+        # Chuyển link tương đối thành tuyệt đối
+        if next_url: next_url = urljoin(base_url, next_url)
+        if prev_url: prev_url = urljoin(base_url, prev_url)
+        
+        return prev_url, next_url
+    except Exception as e:
+        print(f"Nav Extract Error: {e}")
+        return None, None
+
 def get_content_data(url):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8', 'Referer': 'https://www.google.com/'}
     try:
         html_content = None
+        # Ưu tiên requests để lấy HTML gốc (chưa bị Trafilatura lọc mất nút bấm)
         response = requests.get(url, headers=headers, timeout=15, verify=False)
         if response.status_code == 200: html_content = response.text
+        
         if not html_content: html_content = trafilatura.fetch_url(url)
+        
         if html_content:
+            # [MỚI] Tách link điều hướng ngay từ HTML gốc
+            prev_link, next_link = extract_navigation(html_content, url)
+            
+            # Sau đó mới dùng Trafilatura để lấy nội dung chính
             data = trafilatura.bare_extraction(html_content, include_formatting=True, include_images=True, url=url)
             if data:
                 if isinstance(data, dict): raw_title = data.get("title", "Không tiêu đề"); text_content = data.get("text", "")
                 else: raw_title = getattr(data, "title", "Không tiêu đề"); text_content = getattr(data, "text", "")
                 if not text_content: return None
                 series, chapter = parse_metadata(str(raw_title))
-                return {"raw_title": str(raw_title), "series": series, "chapter": chapter, "text": str(text_content)}
+                
+                return {
+                    "raw_title": str(raw_title), "series": series, "chapter": chapter, "text": str(text_content),
+                    "nav": {"prev": prev_link, "next": next_link} # Trả về cả Nav Info
+                }
     except Exception as e: print(f"Crawl error: {e}")
     return None
 
@@ -209,32 +254,22 @@ def call_ai(text, style, model_name):
             return unmask_images(res.choices[0].message.content, imgs)
     except Exception as e: return f"❌ Lỗi AI: {e}"
 
-def modify_chapter(url, step):
-    match = re.search(r'(\d+)(?!.*\d)', url)
-    if match:
-        num_str = match.group(1); new_num = str(int(num_str) + step).zfill(len(num_str))
-        if int(new_num) < 1: return url
-        return url[:match.start(1)] + new_num + url[match.end(1):]
-    return url
-
-def nav_click(step):
-    current = st.session_state['url_input']
-    if current:
-        new = modify_chapter(current, step)
-        if new != current: 
-            st.session_state['url_input'] = new
-            st.session_state['auto_run'] = True
-            st.session_state['force_translate'] = False 
-            st.rerun() 
-        else: st.toast("Không tìm thấy số chương!")
+# [MỚI] Hàm xử lý chuyển trang theo Link thực tế
+def nav_click(direction):
+    target_url = st.session_state['nav_links'].get(direction)
+    if target_url:
+        st.session_state['url_input'] = target_url
+        st.session_state['auto_run'] = True
+        st.session_state['force_translate'] = False 
+        st.rerun()
+    else:
+        st.toast(f"Không tìm thấy chương {direction}!", icon="🚫")
 
 def force_retranslate():
-    st.session_state['force_translate'] = True
-    st.session_state['auto_run'] = True
+    st.session_state['force_translate'] = True; st.session_state['auto_run'] = True
 
 def trigger_run(): 
-    st.session_state['auto_run'] = True
-    st.session_state['force_translate'] = False
+    st.session_state['auto_run'] = True; st.session_state['force_translate'] = False
 
 # --- MAIN UI ---
 st.title("☁️ AI Light Novel Reader (Cloud)")
@@ -260,6 +295,16 @@ if st.session_state['auto_run'] and st.session_state['url_input']:
         st.toast("⚡ Đã tải từ Cloud (Offline)", icon="💾")
         st.session_state['translated_content'] = cached_entry['content']
         st.session_state['stats_info'] = "☁️ Đọc từ Cloud Storage"
+        
+        # [QUAN TRỌNG] Khi load offline, cố gắng khôi phục Nav Link từ dữ liệu đã lưu (nếu có)
+        # Nếu data cũ chưa có nav, thì người dùng phải load online mới có nav
+        if 'nav' in cached_entry:
+            st.session_state['nav_links'] = cached_entry['nav']
+        else:
+             # Nếu bản lưu cũ quá chưa có Nav, thử crawl nhẹ (ko dịch) để lấy nav
+             # Đoạn này tùy chọn, hiện tại để đơn giản thì cho Nav=None nếu đọc offline cũ
+             st.session_state['nav_links'] = {'prev': None, 'next': None}
+
         st.divider()
         st.warning("⚠️ Bạn đang đọc bản lưu Offline.")
         st.button("🔄 Dịch lại chương này (Bỏ qua Cache)", on_click=force_retranslate, use_container_width=True)
@@ -269,14 +314,21 @@ if st.session_state['auto_run'] and st.session_state['url_input']:
         with st.spinner(f"⏳ Đang tải và dịch: {url}..."):
             data = get_content_data(url)
             if data and data['text']:
+                # [MỚI] Cập nhật Nav Links vào State
+                st.session_state['nav_links'] = data['nav']
+                
                 start = time.time()
                 final_html = call_ai(data['text'], style_sel, model_sel)
                 dur = time.time() - start
                 wc = len(re.sub('<[^<]+?>', '', final_html).split())
                 full_content = f"<h3>{data['series']}</h3><h4>{data['chapter']}</h4><hr>{final_html}"
                 
-                # Cập nhật & Lưu
-                new_entry = {'title': data['raw_title'], 'series': data['series'], 'chapter': data['chapter'], 'url': url, 'content': full_content}
+                # Cập nhật & Lưu (Lưu cả Nav Link vào JSON để lần sau đọc offline vẫn next được)
+                new_entry = {
+                    'title': data['raw_title'], 'series': data['series'], 'chapter': data['chapter'], 
+                    'url': url, 'content': full_content,
+                    'nav': data['nav'] # Lưu info điều hướng
+                }
                 st.session_state['history'] = [item for item in st.session_state['history'] if isinstance(item, dict) and item.get('url') != url]
                 st.session_state['history'].append(new_entry)
                 save_history_to_cloud(st.session_state['history'])
@@ -292,6 +344,18 @@ if st.session_state['translated_content']:
     st.divider()
     if st.session_state['stats_info']: st.markdown(f'<div class="speed-box">{st.session_state["stats_info"]}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="reading-content">{st.session_state["translated_content"]}</div>', unsafe_allow_html=True)
+    
+    # [MỚI] Nút Next/Prev thông minh
+    # Kiểm tra xem có link không để disable nút
+    has_prev = bool(st.session_state['nav_links'].get('prev'))
+    has_next = bool(st.session_state['nav_links'].get('next'))
+
     b1, b2 = st.columns(2)
-    with b1: st.button("⬅️ Chương trước", on_click=nav_click, args=(-1,), use_container_width=True)
-    with b2: st.button("Chương sau ➡️", on_click=nav_click, args=(1,), type="primary", use_container_width=True)
+    with b1: 
+        st.button("⬅️ Chương trước", on_click=nav_click, args=('prev',), 
+                  disabled=not has_prev, use_container_width=True, 
+                  help=st.session_state['nav_links'].get('prev', 'Không tìm thấy'))
+    with b2: 
+        st.button("Chương sau ➡️", on_click=nav_click, args=('next',), 
+                  disabled=not has_next, type="primary", use_container_width=True,
+                  help=st.session_state['nav_links'].get('next', 'Không tìm thấy'))
