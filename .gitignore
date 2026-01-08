@@ -1,0 +1,34 @@
+﻿# 1. BẢO MẬT (QUAN TRỌNG NHẤT)
+# Chặn file chứa API Key của Streamlit khi chạy local
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# Chặn file biến môi trường nếu dùng .env
+.env
+.env.local
+
+# 2. FILE RÁC PYTHON
+# File biên dịch bytecode (không cần thiết)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 3. MÔI TRƯỜNG ẢO (VIRTUAL ENV)
+# Chặn thư mục chứa thư viện cài đặt, tránh nặng repo
+venv/
+.venv/
+env/
+ENV/
+
+# 4. DỮ LIỆU LOCAL CỦA APP BẠN
+# Chặn file lịch sử dịch (để tránh conflict khi bạn chạy máy này máy kia)
+# Nếu bạn muốn lưu lịch sử lên github thì xóa dòng dưới đi
+translation_history.json
+
+# 5. CÁC FILE HỆ THỐNG (OS)
+.DS_Store
+Thumbs.db
+
+# 6. IDE SETTINGS (Cấu hình VS Code, PyCharm...)
+.vscode/
+.idea/
