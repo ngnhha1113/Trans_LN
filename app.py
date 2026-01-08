@@ -90,7 +90,26 @@ with st.sidebar:
     st.title("🗂️ Thư viện")
     
     with st.expander("⚙️ Cài đặt", expanded=False):
-        font_choice = st.selectbox("Phông chữ", ("Merriweather (Sách giấy)", "Segoe UI (Hiện đại)", "Roboto", "Arial"), index=0)
+        font_choice = st.selectbox(
+            "Phông chữ",
+            ("Merriweather (Sách giấy)", "Literata (E-book)", "Be Vietnam Pro (Hiện đại)", "Nunito (Êm mắt)", "Lora (Thơ mộng)", "Roboto"),
+            index=0
+        )
+        font_family_map = {
+            "Merriweather (Sách giấy)": "'Merriweather', serif",
+            "Literata (E-book)": "'Literata', serif",
+            "Be Vietnam Pro (Hiện đại)": "'Be Vietnam Pro', sans-serif",
+            "Nunito (Êm mắt)": "'Nunito', sans-serif",
+            "Lora (Thơ mộng)": "'Lora', serif",
+            "Roboto": "'Roboto', sans-serif"
+        }
+        st.markdown(f"""
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;700&family=Literata:opsz,wght@7..72,300;7..72,400&family=Lora:wght@400;700&family=Merriweather:wght@300;400;700&family=Nunito:wght@300;400;700&family=Roboto:wght@300;400;700&display=swap');
+    
+            /* ... các css khác giữ nguyên ... */
+        </style>
+""", unsafe_allow_html=True)
         font_size = st.slider("Cỡ chữ", 14, 32, 20)
     
     st.divider()
