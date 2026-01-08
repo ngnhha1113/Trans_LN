@@ -4,107 +4,141 @@ import google.generativeai as genai
 from openai import OpenAI
 import re
 import time
+import json
+import os
+import requests
+import urllib3
+import warnings
+
+# --- TẮT CẢNH BÁO RÁC ---
+# Tắt cảnh báo SSL khi dùng verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Tắt cảnh báo thư viện cũ của Google (để đỡ rối mắt)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ==========================================
 # CẤU HÌNH API KEY
 # ==========================================
 try:
-    # Ưu tiên lấy từ st.secrets nếu chạy trên cloud
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 except:
-    # Nếu chạy local, điền key trực tiếp vào đây
-    GEMINI_API_KEY = "AIzaSyBLYNskFdd97z-5o-ztZR8SUy72FBUsumE"
-    OPENAI_API_KEY = "DÁN_KEY_OPENAI_NẾU_CÓ"
+    GEMINI_API_KEY = ""
+
+HISTORY_FILE = "translation_history.json"
+
+# --- HÀM XỬ LÝ FILE JSON ---
+def load_history_from_file():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                return [{'title': "Truyện cũ", 'series': "Không rõ", 'chapter': "Chương đã lưu", 'url': url} for url in data.keys()]
+        except: return []
+    return []
+
+def save_history_to_file(history_list):
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history_list, f, ensure_ascii=False, indent=4)
+    except Exception as e: st.toast(f"Lỗi lưu file: {e}")
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="LN Reader Pro (Images)", page_icon="🖼️", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="LN Reader Ultimate", page_icon="📚", layout="wide", initial_sidebar_state="expanded")
 
-# --- QUẢN LÝ STATE (KHỞI TẠO BIẾN) ---
+# --- STATE ---
 if 'url_input' not in st.session_state: st.session_state['url_input'] = ""
 if 'translated_content' not in st.session_state: st.session_state['translated_content'] = ""
 if 'auto_run' not in st.session_state: st.session_state['auto_run'] = False
 if 'stats_info' not in st.session_state: st.session_state['stats_info'] = ""
+if 'history' not in st.session_state: st.session_state['history'] = load_history_from_file()
+
+# --- HÀM TÁCH TÊN TRUYỆN & CHƯƠNG ---
+def parse_metadata(raw_title):
+    clean_title = re.sub(r'( \| .*?)$', '', raw_title) 
+    clean_title = re.sub(r'( - .*? Translation)$', '', clean_title)
+    clean_title = re.sub(r'( - .*? Novel)$', '', clean_title)
+
+    series_name = clean_title
+    chapter_name = "Đọc ngay"
+
+    match_a = re.search(r'(.*?)\s*[-|–]\s*(Chapter \d+.*|Chương \d+.*|Vol \d+.*)', clean_title, re.IGNORECASE)
+    match_b = re.search(r'(Chapter \d+.*|Chương \d+.*|Vol \d+.*)\s*[-|–]\s*(.*)', clean_title, re.IGNORECASE)
+
+    if match_a:
+        series_name = match_a.group(1).strip()
+        chapter_name = match_a.group(2).strip()
+    elif match_b:
+        chapter_name = match_b.group(1).strip()
+        series_name = match_b.group(2).strip()
+    else:
+        split_match = re.search(r'(.*?) (Chapter \d+|Chương \d+)(.*)', clean_title, re.IGNORECASE)
+        if split_match:
+            series_name = split_match.group(1).strip()
+            chapter_name = split_match.group(2).strip() + split_match.group(3).strip()
+
+    return series_name, chapter_name
 
 # ==========================================
-# [MỚI] CÀI ĐẶT HIỂN THỊ (FONT & SIZE)
+# SIDEBAR
 # ==========================================
-with st.expander("⚙️ Cài đặt hiển thị (Font chữ & Kích thước)"):
-    c_font, c_size = st.columns(2)
-    with c_font:
-        font_choice = st.selectbox(
-            "Phông chữ",
-            ("Merriweather (Sách giấy)", "Segoe UI (Hiện đại)", "Roboto", "Arial", "Times New Roman"),
-            index=0 
-        )
-    with c_size:
-        font_size = st.slider("Cỡ chữ (px)", min_value=14, max_value=32, value=20)
+with st.sidebar:
+    st.title("🗂️ Thư viện")
+    
+    with st.expander("⚙️ Cài đặt", expanded=False):
+        font_choice = st.selectbox("Phông chữ", ("Merriweather (Sách giấy)", "Segoe UI (Hiện đại)", "Roboto", "Arial"), index=0)
+        font_size = st.slider("Cỡ chữ", 14, 32, 20)
+    
+    st.divider()
+    
+    c1, c2 = st.columns([3, 1])
+    c1.subheader("🕒 Lịch sử")
+    if c2.button("🗑️", help="Xóa sạch"):
+        st.session_state['history'] = []
+        save_history_to_file([])
+        st.rerun()
 
-# Map tên hiển thị sang tên Font chuẩn CSS
-font_family_map = {
-    "Merriweather (Sách giấy)": "'Merriweather', serif",
-    "Segoe UI (Hiện đại)": "'Segoe UI', sans-serif",
-    "Roboto": "'Roboto', sans-serif",
-    "Arial": "Arial, sans-serif",
-    "Times New Roman": "'Times New Roman', serif"
-}
-selected_font_css = font_family_map.get(font_choice, "sans-serif")
+    display_list = list(reversed(st.session_state['history']))[:30]
+    
+    for i, item in enumerate(display_list):
+        url = item.get('url', '')
+        series = item.get('series', item.get('title', 'Truyện Không Tên'))
+        chapter = item.get('chapter', 'Chương ?')
+        display_series = (series[:28] + '..') if len(series) > 28 else series
+        
+        with st.container():
+            st.markdown(f"**📖 {display_series}**")
+            if st.button(f"👉 {chapter}", key=f"h_{i}", help=url, use_container_width=True):
+                st.session_state['url_input'] = url
+                st.session_state['auto_run'] = True
+                st.rerun()
+            st.markdown("---")
 
-# --- CSS: DARK MODE & UI FIX (ĐÃ CẬP NHẬT DYNAMIC CSS) ---
+# --- CSS ---
+font_map = {"Merriweather (Sách giấy)": "'Merriweather', serif", "Segoe UI (Hiện đại)": "'Segoe UI', sans-serif", "Roboto": "'Roboto', sans-serif", "Arial": "Arial, sans-serif"}
+selected_css = font_map.get(font_choice, "sans-serif")
+
 st.markdown(f"""
 <style>
-    /* Import Google Fonts */
     @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@300;400;700&family=Roboto:wght@300;400;700&display=swap');
-
     .stApp {{ background-color: #0e1117; }}
-    
-    /* Box hiển thị nội dung truyện - Dùng biến Python để chỉnh CSS */
     .reading-content {{ 
-        font-family: {selected_font_css} !important; 
-        font-size: {font_size}px !important; 
-        line-height: 1.8 !important; 
-        color: #e0e0e0; 
-        background-color: #1a1c24; 
-        padding: 40px; 
-        border-radius: 12px; 
-        border: 1px solid #333; 
-        margin-top: 20px;
+        font-family: {selected_css} !important; font-size: {font_size}px !important; 
+        line-height: 1.8 !important; color: #e0e0e0; background-color: #1a1c24; 
+        padding: 40px; border-radius: 12px; border: 1px solid #333; margin-top: 20px;
     }}
-    
-    /* Style cho ảnh trong bài viết */
-    .reading-content img {{
-        display: block;
-        margin: 20px auto;
-        max-width: 100%;
-        border-radius: 8px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }}
-    
-    /* Caption ảnh (nếu có) */
-    .reading-content figure figcaption {{
-        text-align: center;
-        color: #888;
-        font-size: 0.9em;
-        margin-top: 5px;
-    }}
-
-    .speed-box {{
-        background-color: #0f2e1b;
-        color: #4caf50;
-        padding: 10px 20px;
-        border-radius: 8px;
-        border: 1px solid #1e4620;
-        font-family: monospace;
-        font-weight: bold;
-        margin-bottom: 10px;
-    }}
-
-    .stTextInput input {{ color: #fff !important; background-color: #262730 !important; }}
-    div.stButton > button {{ height: 3em; font-weight: bold; }}
+    .reading-content img {{ display: block; margin: 20px auto; max-width: 100%; border-radius: 8px; }}
+    .reading-content figure figcaption {{ text-align: center; color: #888; font-size: 0.9em; }}
+    div.stButton > button {{ border-radius: 6px; }}
+    .stMarkdown p {{ margin-bottom: 0px; }}
 </style>
 """, unsafe_allow_html=True)
 
-# --- XỬ LÝ ẢNH (MASKING & UNMASKING) ---
+# --- CORE LOGIC ---
 def mask_images(text):
     image_pattern = r'!\[.*?\]\((.*?)\)'
     images = re.findall(image_pattern, text)
@@ -116,121 +150,124 @@ def mask_images(text):
 def unmask_images(text, images):
     restored_text = text
     for i, img_url in enumerate(images):
-        placeholder = f"[[IMG_{i}]]"
-        html_img = f'<img src="{img_url}" alt="Illustration">'
-        if placeholder in restored_text:
-            restored_text = restored_text.replace(placeholder, html_img)
-        else:
-            restored_text += f"\n\n{html_img}"
+        html_img = f'<img src="{img_url}" alt="Minh họa">'
+        if f"[[IMG_{i}]]" in restored_text:
+            restored_text = restored_text.replace(f"[[IMG_{i}]]", html_img)
+        else: restored_text += f"\n\n{html_img}"
     return restored_text
 
-# --- CÁC HÀM XỬ LÝ URL ---
-def modify_chapter_number(url, step):
-    match = re.search(r'(\d+)(?!.*\d)', url)
-    if match:
-        number_str = match.group(1)
-        num = int(number_str) + step
-        if num < 1: return url
-        new_number_str = str(num).zfill(len(number_str))
-        prefix = url[:match.start(1)]
-        suffix = url[match.end(1):]
-        return f"{prefix}{new_number_str}{suffix}"
-    return url
-
-def get_content(url):
+# ========================================================
+# [ĐÃ SỬA LỖI] HÀM CRAWL CHẤP HẾT MỌI LOẠI DATA TRẢ VỀ
+# ========================================================
+def get_content_data(url):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Referer': 'https://www.google.com/'
+    }
+    
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
-            return trafilatura.extract(downloaded, include_formatting=True, include_images=True) 
-        return None
-    except:
-        return None
+        html_content = None
+        # Ưu tiên requests để fake header
+        response = requests.get(url, headers=headers, timeout=15, verify=False)
+        if response.status_code == 200:
+            html_content = response.text
+        
+        # Nếu requests tạch, thử trafilatura fetch
+        if not html_content:
+            html_content = trafilatura.fetch_url(url)
 
-# --- XÂY DỰNG PROMPT ---
+        if html_content:
+            # Lấy dữ liệu thô
+            data = trafilatura.bare_extraction(html_content, include_formatting=True, include_images=True, url=url)
+            
+            if data:
+                # [QUAN TRỌNG] Kiểm tra kiểu dữ liệu để tránh lỗi 'Document object has no attribute get'
+                if isinstance(data, dict):
+                    raw_title = data.get("title", "Không tiêu đề")
+                    text_content = data.get("text", "")
+                else:
+                    # Nếu là Object (Document), dùng getattr để lấy
+                    raw_title = getattr(data, "title", "Không tiêu đề")
+                    text_content = getattr(data, "text", "")
+
+                # Nếu text rỗng thì coi như lỗi
+                if not text_content:
+                    return None
+
+                # Tách tên truyện và chương
+                series, chapter = parse_metadata(str(raw_title))
+                
+                return {
+                    "raw_title": str(raw_title),
+                    "series": series,
+                    "chapter": chapter,
+                    "text": str(text_content)
+                }
+    except Exception as e:
+        print(f"Crawl error: {e}")
+        # Không throw lỗi ra màn hình để tránh làm user sợ, chỉ in ra console
+    return None
+
 def build_messages(text, style):
     style_desc = {
-        "Kiếm Hiệp / Tiên Hiệp": "Ưu tiên từ Hán Việt. Văn phong cổ trang, hào hùng.",
-        "Fantasy / Isekai": "Văn phong hiện đại. Giữ nguyên thuật ngữ game.",
-        "Đời thường": "Văn phong nhẹ nhàng, trôi chảy, tự nhiên.",
-        "Sắc (R18)": "Mô tả chi tiết, văn phong phóng khoáng."
+        "Kiếm Hiệp / Tiên Hiệp": "Hán Việt, cổ trang.",
+        "Fantasy / Isekai": "Hiện đại, giữ term game.",
+        "Đời thường": "Tự nhiên, nhẹ nhàng.",
+        "Sắc (R18)": "Mô tả chi tiết."
     }.get(style, "")
+    return [{"role": "system", "content": f"Dịch sang TIẾNG VIỆT. Phong cách: {style_desc}. Giữ nguyên Markdown và thẻ [[IMG_x]]."}, 
+            {"role": "user", "content": text}]
 
-    system_prompt = f"""
-    Bạn là biên dịch viên Light Novel. Nhiệm vụ: Dịch văn bản sang TIẾNG VIỆT.
-    
-    QUY TẮC BẮT BUỘC:
-    1. Giữ nguyên định dạng Markdown.
-    2. TUYỆT ĐỐI KHÔNG DỊCH HAY XÓA CÁC THẺ: [[IMG_0]], [[IMG_1]],... Hãy giữ nguyên chúng ở đúng vị trí.
-    3. Phong cách: {style_desc}
-    4. Không thêm lời dẫn. Chỉ trả về kết quả dịch.
-    """
-    
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Dịch văn bản sau:\n\n{text}"}
-    ]
-
-# --- HÀM GỌI MODEL ---
-def call_gemini(text, style, model_name):
+def call_ai(text, style, model_name):
+    masked, imgs = mask_images(text)
     try:
-        masked_text, images = mask_images(text)
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name)
-        msgs = build_messages(masked_text, style)
-        full_prompt = msgs[0]['content'] + "\n\n" + msgs[1]['content']
-        response = model.generate_content(full_prompt)
-        final_html = unmask_images(response.text, images)
-        return final_html
-    except Exception as e: return f"❌ Lỗi Gemini: {e}"
+        if "Gemini" in model_name:
+            m_id = model_name.split("(")[1].replace(")", "")
+            genai.configure(api_key=GEMINI_API_KEY)
+            model = genai.GenerativeModel(m_id)
+            msgs = build_messages(masked, style)
+            res = model.generate_content(msgs[0]['content'] + "\n" + msgs[1]['content'])
+            return unmask_images(res.text, imgs)
+        elif "ChatGPT" in model_name:
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            res = client.chat.completions.create(model="gpt-4o-mini", messages=build_messages(masked, style))
+            return unmask_images(res.choices[0].message.content, imgs)
+        else: # Ollama
+            m_id = model_name.split("(")[1].replace(")", "")
+            client = OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
+            res = client.chat.completions.create(model=m_id, messages=build_messages(masked, style), temperature=0.3)
+            return unmask_images(res.choices[0].message.content, imgs)
+    except Exception as e: return f"❌ Lỗi AI: {e}"
 
-def call_openai(text, style):
-    try:
-        masked_text, images = mask_images(text)
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini", 
-            messages=build_messages(masked_text, style)
-        )
-        translated_raw = response.choices[0].message.content
-        return unmask_images(translated_raw, images)
-    except Exception as e: return f"❌ Lỗi OpenAI: {e}"
+def modify_chapter(url, step):
+    match = re.search(r'(\d+)(?!.*\d)', url)
+    if match:
+        num_str = match.group(1)
+        new_num = str(int(num_str) + step).zfill(len(num_str))
+        if int(new_num) < 1: return url
+        return url[:match.start(1)] + new_num + url[match.end(1):]
+    return url
 
-def call_ollama(text, style, model_name="qwen2.5:7b"):
-    try:
-        masked_text, images = mask_images(text)
-        client = OpenAI(base_url='http://localhost:11434/v1', api_key='ollama')
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=build_messages(masked_text, style),
-            temperature=0.3,
-            presence_penalty=1.1 
-        )
-        translated_raw = response.choices[0].message.content
-        return unmask_images(translated_raw, images)
-    except Exception as e: 
-        return f"❌ Lỗi Ollama: {e}"
-
-# --- GIAO DIỆN CHÍNH ---
-st.title("🖼️ LN Reader Ultimate (Có Ảnh Minh Họa)")
-
-def trigger_translation(): st.session_state['auto_run'] = True
-
-def handle_nav(step):
+def nav_click(step):
     current = st.session_state['url_input']
     if current:
-        new_url = modify_chapter_number(current, step)
-        if new_url != current:
-            st.session_state['url_input'] = new_url
+        new = modify_chapter(current, step)
+        if new != current:
+            st.session_state['url_input'] = new
             st.session_state['auto_run'] = True
-        else:
-            st.toast("⚠️ Không tìm thấy số chương!", icon="🚫")
+        else: st.toast("Không tìm thấy số chương!")
 
-# INPUT & CONFIG
-st.text_input("Link chương truyện:", key="url_input", placeholder="Nhập link...", on_change=trigger_translation)
+def trigger_run(): st.session_state['auto_run'] = True
+
+# --- MAIN UI ---
+st.title("📚 AI Light Novel Reader")
+
+st.text_input("Link chương truyện:", key="url_input", on_change=trigger_run, placeholder="Nhập link...")
 
 c1, c2 = st.columns(2)
 with c1:
-    model_options = [
+    m_opt = [
         "Gemini (gemini-2.5-flash)",
         "Gemini (gemini-flash-latest)",
         "Gemini (gemini-flash-lite-latest)",
@@ -238,61 +275,50 @@ with c1:
         "Gemini (gemma-3-27b-it)",     
         "ChatGPT (gpt-4o-mini)"
     ]
-    model_choice = st.selectbox("Engine", model_options)
+    model_sel = st.selectbox("Engine", m_opt)
 with c2:
-    style_choice = st.selectbox("Style", ("Fantasy / Isekai", "Kiếm Hiệp / Tiên Hiệp", "Đời thường", "Sắc (R18)"))
+    style_sel = st.selectbox("Style", ("Fantasy / Isekai", "Kiếm Hiệp / Tiên Hiệp", "Đời thường", "Sắc (R18)"))
 
-st.button("🚀 DỊCH & LOAD ẢNH", on_click=trigger_translation, type="primary", use_container_width=True)
+st.button("🚀 DỊCH NGAY", on_click=trigger_run, type="primary", use_container_width=True)
 
-# PROCESS
+# --- EXECUTION ---
 if st.session_state['auto_run'] and st.session_state['url_input']:
     url = st.session_state['url_input']
-    with st.spinner(f"⏳ Đang tải văn bản và ảnh từ: {url}..."):
-        st.session_state['translated_content'] = ""
-        st.session_state['stats_info'] = ""
+    
+    with st.spinner(f"⏳ Đang tải và phân tích: {url}..."):
+        data = get_content_data(url)
         
-        raw_text = get_content(url)
-        
-        if raw_text:
-            start_time = time.time()
+        if data and data['text']:
+            new_entry = {
+                'title': data['raw_title'],
+                'series': data['series'],
+                'chapter': data['chapter'],
+                'url': url
+            }
             
-            if "Gemini" in model_choice:
-                gemini_model_id = model_choice.split("(")[1].replace(")", "")
-                final_html = call_gemini(raw_text, style_choice, gemini_model_id)
-            elif "ChatGPT" in model_choice:
-                final_html = call_openai(raw_text, style_choice)
-            else:
-                ollama_model = model_choice.split("(")[1].replace(")", "")
-                final_html = call_ollama(raw_text, style_choice, ollama_model)
+            st.session_state['history'] = [item for item in st.session_state['history'] if isinstance(item, dict) and item.get('url') != url]
+            st.session_state['history'].append(new_entry)
+            save_history_to_file(st.session_state['history'])
             
-            end_time = time.time()
-            duration = end_time - start_time
+            start = time.time()
+            final_html = call_ai(data['text'], style_sel, model_sel)
+            dur = time.time() - start
+            wc = len(re.sub('<[^<]+?>', '', final_html).split())
             
-            # Đếm từ (lược bỏ tag html để đếm cho đúng)
-            clean_text = re.sub('<[^<]+?>', '', final_html)
-            word_count = len(clean_text.split())
-            speed = word_count / duration if duration > 0 else 0
-            
-            st.session_state['translated_content'] = final_html
-            st.session_state['stats_info'] = f"⏱️ {duration:.2f}s | ⚡ {speed:.1f} w/s | 📝 {word_count} từ | 🖼️ Đã xử lý ảnh"
+            header_html = f"<h3>{data['series']}</h3><h4>{data['chapter']}</h4><hr>"
+            st.session_state['translated_content'] = header_html + final_html
+            st.session_state['stats_info'] = f"⏱️ {dur:.2f}s | 📝 {wc} từ"
         else:
-            st.error("❌ Không lấy được nội dung! (Có thể web chặn bot)")
+            st.error("❌ Không lấy được nội dung! (Web chặn bot hoặc link chết)")
+            
     st.session_state['auto_run'] = False
 
-# OUTPUT
+# --- OUTPUT AREA ---
 if st.session_state['translated_content']:
     st.divider()
-    if st.session_state['stats_info']:
-        st.markdown(f'<div class="speed-box">{st.session_state["stats_info"]}</div>', unsafe_allow_html=True)
+    if st.session_state['stats_info']: st.markdown(f'<div class="speed-box">{st.session_state["stats_info"]}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="reading-content">{st.session_state["translated_content"]}</div>', unsafe_allow_html=True)
     
-    # QUAN TRỌNG: allow_html=True để render được thẻ <img>
-    st.markdown(f"""
-    <div class="reading-content">
-        {st.session_state['translated_content']}
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.write("")
     b1, b2 = st.columns(2)
-    with b1: st.button("⬅️ Trước", on_click=handle_nav, args=(-1,), use_container_width=True)
-    with b2: st.button("Sau ➡️", on_click=handle_nav, args=(1,), type="primary", use_container_width=True)
+    with b1: st.button("⬅️ Chương trước", on_click=nav_click, args=(-1,), use_container_width=True)
+    with b2: st.button("Chương sau ➡️", on_click=nav_click, args=(1,), type="primary", use_container_width=True)
