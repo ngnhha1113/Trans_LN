@@ -3,3 +3,4 @@ google-generativeai
 openai
 trafilatura
 beautifulsoup4
+requests
