@@ -23,7 +23,7 @@ ENV/
 # 4. DỮ LIỆU LOCAL CỦA APP BẠN
 # Chặn file lịch sử dịch (để tránh conflict khi bạn chạy máy này máy kia)
 # Nếu bạn muốn lưu lịch sử lên github thì xóa dòng dưới đi
-translation_history.json
+
 
 # 5. CÁC FILE HỆ THỐNG (OS)
 .DS_Store
